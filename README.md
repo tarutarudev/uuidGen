@@ -7,3 +7,4 @@ The supported platform is Linux / amd64 only.
 2. Run `git clone https://github.com/tarutarudev/UUIDGenerator.git && cd UUIDGenerator`
 3. cd into crystal or go.
 4. Launch the executable file inside it.
+5. Open localhost:3000
