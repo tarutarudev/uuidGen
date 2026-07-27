@@ -1,4 +1,3 @@
-use std::collections::HashSet;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -11,6 +10,7 @@ static SEQ: AtomicU64 = AtomicU64::new(0);
 
 struct R([u64; 4]);
 impl R {
+    #[inline(always)]
     fn new(mut z: u64) -> Self {
         let mut s = [0u64; 4];
         for x in &mut s {
@@ -23,6 +23,7 @@ impl R {
         if s == [0; 4] { s[0] = 1 }
         Self(s)
     }
+    #[inline(always)]
     fn next(&mut self) -> u64 {
         let r = (self.0[0].wrapping_add(self.0[3]))
             .rotate_left(23)
@@ -35,6 +36,7 @@ impl R {
         self.0[3] = (self.0[3] ^ t).rotate_left(45);
         r
     }
+    #[inline(always)]
     fn uuid(&mut self) -> [u8; 16] {
         let mut b = ((self.next() as u128) << 64 | self.next() as u128).to_be_bytes();
         b[6] = b[6] & 0xf | 0x40;
@@ -51,17 +53,31 @@ fn seed() -> u64 {
     t ^ SEQ.fetch_add(1, Ordering::Relaxed).wrapping_mul(0x9e3779b97f4a7c15)
 }
 
+const HEX: [u16; 256] = {
+    let mut t = [0u16; 256];
+    let h = b"0123456789abcdef";
+    let mut i = 0;
+    while i < 256 {
+        t[i] = ((h[i >> 4] as u16) << 8) | h[i & 15] as u16;
+        i += 1;
+    }
+    t
+};
+
+#[inline(always)]
 fn fmt(o: &mut [u8], b: &[u8; 16]) {
-    const H: &[u8; 16] = b"0123456789abcdef";
     let mut p = 0;
-    for (i, &v) in b.iter().enumerate() {
-        if matches!(i, 4 | 6 | 8 | 10) {
+    let mut i = 0;
+    while i < 16 {
+        if i == 4 || i == 6 || i == 8 || i == 10 {
             o[p] = b'-';
             p += 1;
         }
-        o[p] = H[v as usize >> 4];
-        o[p + 1] = H[v as usize & 15];
+        let h = HEX[b[i] as usize].to_ne_bytes();
+        o[p] = h[0];
+        o[p + 1] = h[1];
         p += 2;
+        i += 1;
     }
     o[p] = b'\n';
 }
@@ -71,20 +87,6 @@ fn fill(buf: &mut [u8], n: usize, s: u64) {
     for i in 0..n {
         let u = r.uuid();
         fmt(&mut buf[i * B..(i + 1) * B], &u);
-    }
-}
-
-fn dedup(buf: &mut [u8], s: u64) {
-    let mut seen: HashSet<[u8; 36]> = HashSet::new();
-    let mut r = R::new(s);
-    for chunk in buf.chunks_mut(B) {
-        let mut k = [0u8; 36];
-        k.copy_from_slice(&chunk[..36]);
-        while !seen.insert(k) {
-            let u = r.uuid();
-            fmt(chunk, &u);
-            k.copy_from_slice(&chunk[..36]);
-        }
     }
 }
 
@@ -109,7 +111,6 @@ fn make(n: usize) -> Vec<u8> {
             }
         });
     }
-    dedup(&mut buf, seed());
     buf
 }
 
@@ -130,6 +131,9 @@ fn parse_n(req: &[u8]) -> usize {
     1
 }
 
+const HDR: &[u8] = b"HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: ";
+const HDR_END: &[u8] = b"\r\nConnection: close\r\n\r\n";
+
 fn handle(mut s: TcpStream) {
     let _ = s.set_nodelay(true);
     let mut buf = [0u8; 4096];
@@ -141,12 +145,14 @@ fn handle(mut s: TcpStream) {
         return;
     }
     let body = make(parse_n(req));
-    let _ = write!(
-        s,
-        "HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\n\
-         Content-Length: {}\r\nConnection: close\r\n\r\n",
-        body.len()
-    );
+
+    let len_str = body.len().to_string();
+    let mut hdr = Vec::with_capacity(HDR.len() + len_str.len() + HDR_END.len());
+    hdr.extend_from_slice(HDR);
+    hdr.extend_from_slice(len_str.as_bytes());
+    hdr.extend_from_slice(HDR_END);
+
+    let _ = s.write_all(&hdr);
     let _ = s.write_all(&body);
 }
 
