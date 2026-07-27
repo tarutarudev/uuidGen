@@ -4,208 +4,129 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-const MAX_N: usize = 10_000_000;
-const HEX: &[u8; 16] = b"0123456789abcdef";
-
+const MAX: usize = 10_000_000;
+const UL: usize = 37;
 static SEQ: AtomicU64 = AtomicU64::new(0);
 
-struct Rng([u64; 4]);
-
-impl Rng {
-    #[inline(always)]
-    fn new(seed: u64) -> Self {
-        let mut z = seed;
+struct R([u64; 4]);
+impl R {
+    fn new(mut z: u64) -> Self {
         let mut s = [0u64; 4];
-
         for x in &mut s {
             z = z.wrapping_add(0x9e3779b97f4a7c15);
             let mut y = z;
-            y = (y ^ (y >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
-            y = (y ^ (y >> 27)).wrapping_mul(0x94d049bb133111eb);
-            *x = y ^ (y >> 31);
+            y = (y ^ y >> 30).wrapping_mul(0xbf58476d1ce4e5b9);
+            y = (y ^ y >> 27).wrapping_mul(0x94d049bb133111eb);
+            *x = y ^ y >> 31;
         }
-
-        if s.iter().all(|&x| x == 0) {
-            s[0] = 1;
-        }
-
+        if s == [0; 4] { s[0] = 1 }
         Self(s)
     }
-
-    #[inline(always)]
     fn next(&mut self) -> u64 {
-        let result = (self.0[0].wrapping_add(self.0[3]))
-            .rotate_left(23)
-            .wrapping_add(self.0[0]);
-
+        let r = (self.0[0].wrapping_add(self.0[3])).rotate_left(23).wrapping_add(self.0[0]);
         let t = self.0[1] << 17;
-
         self.0[2] ^= self.0[0];
         self.0[3] ^= self.0[1];
         self.0[1] ^= self.0[2];
         self.0[0] ^= self.0[3];
-        self.0[3] ^= t;
-        self.0[3] = self.0[3].rotate_left(45);
-
-        result
+        self.0[3] = (self.0[3] ^ t).rotate_left(45);
+        r
     }
-
-    #[inline(always)]
-    fn uuid(&mut self) -> u128 {
-        let mut x = ((self.next() as u128) << 64) | self.next() as u128;
-
-        // version 4
-        x = (x & !(0xfu128 << 76)) | (4u128 << 76);
-
-        // variant 10xxxxxx
-        x = (x & !(0x3u128 << 62)) | (2u128 << 62);
-
-        x
+    fn uuid(&mut self) -> [u8; 16] {
+        let mut b = ((self.next() as u128) << 64 | self.next() as u128).to_be_bytes();
+        b[6] = b[6] & 0xf | 0x40;
+        b[8] = b[8] & 0x3f | 0x80;
+        b
     }
 }
 
-#[inline(always)]
-fn push_uuid(out: &mut Vec<u8>, x: u128) {
-    let b = x.to_be_bytes();
-
-    for (i, &c) in b.iter().enumerate() {
-        if i == 4 || i == 6 || i == 8 || i == 10 {
-            out.push(b'-');
-        }
-
-        out.push(HEX[(c >> 4) as usize]);
-        out.push(HEX[(c & 15) as usize]);
-    }
-
-    out.push(b'\n');
-}
-
-fn make_seed() -> u64 {
-    SystemTime::now()
+fn seed() -> u64 {
+    let t = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_nanos() as u64)
-        .unwrap_or(0)
-        ^ SEQ
-            .fetch_add(1, Ordering::Relaxed)
-            .wrapping_mul(0x9e3779b97f4a7c15)
+        .unwrap_or(0);
+    t ^ SEQ.fetch_add(1, Ordering::Relaxed).wrapping_mul(0x9e3779b97f4a7c15)
 }
 
-fn generate_chunk(count: usize, seed: u64) -> Vec<u8> {
-    let mut rng = Rng::new(seed);
-    let mut out = Vec::with_capacity(count.saturating_mul(37));
-
-    for _ in 0..count {
-        push_uuid(&mut out, rng.uuid());
+fn fmt(o: &mut [u8], b: &[u8; 16]) {
+    const H: &[u8; 16] = b"0123456789abcdef";
+    let mut p = 0;
+    for (i, &v) in b.iter().enumerate() {
+        if [4, 6, 8, 10].contains(&i) { o[p] = b'-'; p += 1 }
+        o[p] = H[v as usize >> 4];
+        o[p + 1] = H[v as usize & 15];
+        p += 2;
     }
-
-    out
+    o[p] = b'\n';
 }
 
-fn generate(n: usize) -> Vec<Vec<u8>> {
-    let n = n.min(MAX_N);
-
-    if n == 0 {
-        return Vec::new();
+fn fill(buf: &mut [u8], n: usize, s: u64) {
+    let mut r = R::new(s);
+    for i in 0..n {
+        let u = r.uuid();
+        fmt(&mut buf[i * UL..(i + 1) * UL], &u);
     }
+}
 
-    let seed = make_seed();
-
-    // 少量ならスレッド生成コストを避ける
+fn gen(n: usize) -> Vec<u8> {
+    let n = n.min(MAX);
+    if n == 0 { return vec![] }
+    let mut buf = vec![0u8; n * UL];
     if n < 8192 {
-        return vec![generate_chunk(n, seed)];
+        fill(&mut buf, n, seed());
+        return buf;
     }
-
-    let workers = thread::available_parallelism()
-        .map(|v| v.get())
-        .unwrap_or(4)
-        .min(n);
-
-    let chunk = (n + workers - 1) / workers;
-
-    thread::scope(|s| {
-        let mut handles = Vec::with_capacity(workers);
-
-        for w in 0..workers {
-            let start = w * chunk;
-            let end = (start + chunk).min(n);
-
-            if start >= end {
-                break;
-            }
-
-            let count = end - start;
-            let thread_seed = seed ^ (w as u64 + 1).wrapping_mul(0xbf58476d1ce4e5b9);
-
-            handles.push(s.spawn(move || generate_chunk(count, thread_seed)));
+    let w = thread::available_parallelism().map(|v| v.get()).unwrap_or(4).min(n);
+    let s = seed();
+    let c = (n + w - 1) / w;
+    thread::scope(|sc| {
+        for (i, sl) in buf.chunks_mut(c * UL).enumerate() {
+            let cnt = sl.len() / UL;
+            let ts = s ^ (i as u64 + 1).wrapping_mul(0xbf58476d1ce4e5b9);
+            sc.spawn(move || fill(sl, cnt, ts));
         }
-
-        handles.into_iter().map(|h| h.join().unwrap()).collect()
-    })
+    });
+    buf
 }
 
-fn parse_n(req: &str) -> usize {
-    let Some(target) = req.split_whitespace().nth(1) else {
-        return 1;
-    };
-
-    let Some(query) = target.split_once('?').map(|(_, q)| q) else {
-        return 1;
-    };
-
-    for kv in query.split('&') {
-        if let Some(v) = kv.strip_prefix("n=") {
-            let end = v
-                .find(|c: char| !c.is_ascii_digit())
-                .unwrap_or(v.len());
-
-            if let Ok(n) = v[..end].parse::<usize>() {
-                return n.min(MAX_N);
-            }
+fn parse_n(req: &[u8]) -> usize {
+    let Some(t) = req.split(|&b| b == b' ').nth(1) else { return 1 };
+    let Some(q) = t.split(|&b| b == b'?').nth(1) else { return 1 };
+    for kv in q.split(|&b| b == b'&') {
+        if kv.starts_with(b"n=") {
+            return kv[2..]
+                .iter()
+                .take_while(|b| b.is_ascii_digit())
+                .fold(0usize, |a, &c| a.saturating_mul(10).saturating_add((c - b'0') as usize))
+                .min(MAX);
         }
     }
-
     1
 }
 
-fn handle(mut stream: TcpStream) {
-    let _ = stream.set_nodelay(true);
-
+fn handle(mut s: TcpStream) {
+    let _ = s.set_nodelay(true);
     let mut buf = [0u8; 4096];
-    let Ok(nread) = stream.read(&mut buf) else {
-        return;
-    };
-
-    let req = String::from_utf8_lossy(&buf[..nread]);
-    let target = req.split_whitespace().nth(1).unwrap_or("/");
-
-    if target.starts_with("/favicon.ico") {
-        let _ = stream.write_all(b"HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n");
+    let Ok(n) = s.read(&mut buf) else { return };
+    if n == 0 { return }
+    let req = &buf[..n];
+    if req.split(|&b| b == b' ').nth(1).is_some_and(|t| t.starts_with(b"/favicon")) {
+        let _ = s.write_all(b"HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n");
         return;
     }
-
-    let n = parse_n(&req);
-    let chunks = generate(n);
-
-    let len: usize = chunks.iter().map(|c| c.len()).sum();
-
-    let head = format!(
-        "HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: {len}\r\nConnection: close\r\n\r\n"
+    let body = gen(parse_n(req));
+    let _ = write!(
+        s,
+        "HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        body.len()
     );
-
-    let _ = stream.write_all(head.as_bytes());
-
-    for chunk in chunks {
-        let _ = stream.write_all(&chunk);
-    }
+    let _ = s.write_all(&body);
 }
 
 fn main() {
-    let addr = "127.0.0.1:4545";
-    let listener = TcpListener::bind(addr).expect("bind failed");
-
-    println!("http://{addr}");
-
-    for stream in listener.incoming().flatten() {
-        thread::spawn(|| handle(stream));
+    let l = TcpListener::bind("127.0.0.1:4545").expect("bind");
+    println!("http://127.0.0.1:4545");
+    for s in l.incoming().flatten() {
+        thread::spawn(|| handle(s));
     }
 }
