@@ -5,7 +5,7 @@ use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const MAX: usize = 10_000_000;
-const UL: usize = 37;
+const B: usize = 37;
 static SEQ: AtomicU64 = AtomicU64::new(0);
 
 struct R([u64; 4]);
@@ -23,7 +23,9 @@ impl R {
         Self(s)
     }
     fn next(&mut self) -> u64 {
-        let r = (self.0[0].wrapping_add(self.0[3])).rotate_left(23).wrapping_add(self.0[0]);
+        let r = (self.0[0].wrapping_add(self.0[3]))
+            .rotate_left(23)
+            .wrapping_add(self.0[0]);
         let t = self.0[1] << 17;
         self.0[2] ^= self.0[0];
         self.0[3] ^= self.0[1];
@@ -52,7 +54,10 @@ fn fmt(o: &mut [u8], b: &[u8; 16]) {
     const H: &[u8; 16] = b"0123456789abcdef";
     let mut p = 0;
     for (i, &v) in b.iter().enumerate() {
-        if [4, 6, 8, 10].contains(&i) { o[p] = b'-'; p += 1 }
+        if matches!(i, 4 | 6 | 8 | 10) {
+            o[p] = b'-';
+            p += 1;
+        }
         o[p] = H[v as usize >> 4];
         o[p + 1] = H[v as usize & 15];
         p += 2;
@@ -64,24 +69,27 @@ fn fill(buf: &mut [u8], n: usize, s: u64) {
     let mut r = R::new(s);
     for i in 0..n {
         let u = r.uuid();
-        fmt(&mut buf[i * UL..(i + 1) * UL], &u);
+        fmt(&mut buf[i * B..(i + 1) * B], &u);
     }
 }
 
-fn gen(n: usize) -> Vec<u8> {
+fn make(n: usize) -> Vec<u8> {
     let n = n.min(MAX);
     if n == 0 { return vec![] }
-    let mut buf = vec![0u8; n * UL];
+    let mut buf = vec![0u8; n * B];
     if n < 8192 {
         fill(&mut buf, n, seed());
         return buf;
     }
-    let w = thread::available_parallelism().map(|v| v.get()).unwrap_or(4).min(n);
+    let w = thread::available_parallelism()
+        .map(|v| v.get())
+        .unwrap_or(4)
+        .min(n);
     let s = seed();
     let c = (n + w - 1) / w;
     thread::scope(|sc| {
-        for (i, sl) in buf.chunks_mut(c * UL).enumerate() {
-            let cnt = sl.len() / UL;
+        for (i, sl) in buf.chunks_mut(c * B).enumerate() {
+            let cnt = sl.len() / B;
             let ts = s ^ (i as u64 + 1).wrapping_mul(0xbf58476d1ce4e5b9);
             sc.spawn(move || fill(sl, cnt, ts));
         }
@@ -97,7 +105,9 @@ fn parse_n(req: &[u8]) -> usize {
             return kv[2..]
                 .iter()
                 .take_while(|b| b.is_ascii_digit())
-                .fold(0usize, |a, &c| a.saturating_mul(10).saturating_add((c - b'0') as usize))
+                .fold(0usize, |a, &c| {
+                    a.saturating_mul(10).saturating_add((c - b'0') as usize)
+                })
                 .min(MAX);
         }
     }
@@ -114,10 +124,11 @@ fn handle(mut s: TcpStream) {
         let _ = s.write_all(b"HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n");
         return;
     }
-    let body = gen(parse_n(req));
+    let body = make(parse_n(req));
     let _ = write!(
         s,
-        "HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        "HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\n\
+         Content-Length: {}\r\nConnection: close\r\n\r\n",
         body.len()
     );
     let _ = s.write_all(&body);
