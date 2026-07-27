@@ -4,9 +4,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-const MAX_N: usize = 100;
-static SEQ: AtomicU64 = AtomicU64::new(0);
+const MAX_N: usize = 10_000_000;
 const HEX: &[u8; 16] = b"0123456789abcdef";
+
+static SEQ: AtomicU64 = AtomicU64::new(0);
 
 struct Rng([u64; 4]);
 
@@ -89,9 +90,9 @@ fn make_seed() -> u64 {
             .wrapping_mul(0x9e3779b97f4a7c15)
 }
 
-fn gen_chunk(count: usize, seed: u64) -> Vec<u8> {
+fn generate_chunk(count: usize, seed: u64) -> Vec<u8> {
     let mut rng = Rng::new(seed);
-    let mut out = Vec::with_capacity(count * 37);
+    let mut out = Vec::with_capacity(count.saturating_mul(37));
 
     for _ in 0..count {
         push_uuid(&mut out, rng.uuid());
@@ -100,7 +101,7 @@ fn gen_chunk(count: usize, seed: u64) -> Vec<u8> {
     out
 }
 
-fn gen(n: usize) -> Vec<Vec<u8>> {
+fn generate(n: usize) -> Vec<Vec<u8>> {
     let n = n.min(MAX_N);
 
     if n == 0 {
@@ -109,9 +110,9 @@ fn gen(n: usize) -> Vec<Vec<u8>> {
 
     let seed = make_seed();
 
-    // 小さいリクエストはスレッド生成コストを避ける
+    // 少量ならスレッド生成コストを避ける
     if n < 8192 {
-        return vec![gen_chunk(n, seed)];
+        return vec![generate_chunk(n, seed)];
     }
 
     let workers = thread::available_parallelism()
@@ -135,13 +136,10 @@ fn gen(n: usize) -> Vec<Vec<u8>> {
             let count = end - start;
             let thread_seed = seed ^ (w as u64 + 1).wrapping_mul(0xbf58476d1ce4e5b9);
 
-            handles.push(s.spawn(move || gen_chunk(count, thread_seed)));
+            handles.push(s.spawn(move || generate_chunk(count, thread_seed)));
         }
 
-        handles
-            .into_iter()
-            .map(|h| h.join().unwrap())
-            .collect()
+        handles.into_iter().map(|h| h.join().unwrap()).collect()
     })
 }
 
@@ -173,9 +171,8 @@ fn handle(mut stream: TcpStream) {
     let _ = stream.set_nodelay(true);
 
     let mut buf = [0u8; 4096];
-    let nread = match stream.read(&mut buf) {
-        Ok(n) => n,
-        Err(_) => return,
+    let Ok(nread) = stream.read(&mut buf) else {
+        return;
     };
 
     let req = String::from_utf8_lossy(&buf[..nread]);
@@ -187,7 +184,7 @@ fn handle(mut stream: TcpStream) {
     }
 
     let n = parse_n(&req);
-    let chunks = gen(n);
+    let chunks = generate(n);
 
     let len: usize = chunks.iter().map(|c| c.len()).sum();
 
@@ -208,9 +205,7 @@ fn main() {
 
     println!("http://{addr}");
 
-    for stream in listener.incoming() {
-        if let Ok(stream) = stream {
-            thread::spawn(|| handle(stream));
-        }
+    for stream in listener.incoming().flatten() {
+        thread::spawn(|| handle(stream));
     }
 }
