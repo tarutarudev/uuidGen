@@ -4,7 +4,5 @@ The supported platform is Linux / amd64 only.
 
 ## Usage
 1. Open the terminal
-2. Run `git clone https://github.com/tarutarudev/UUIDGenerator.git && cd UUIDGenerator/main/`
-3. cd into crystal or go.
-4. Launch the executable file inside it.
-5. Open localhost:3000
+2. Run `git clone https://github.com/tarutarudev/uuidGen.git && cd uuidGen && RUSTFLAGS='-C target-cpu=native' cargo run --release`
+3. Open localhost:3000
