@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -73,27 +74,42 @@ fn fill(buf: &mut [u8], n: usize, s: u64) {
     }
 }
 
+fn dedup(buf: &mut [u8], s: u64) {
+    let mut seen: HashSet<[u8; 36]> = HashSet::new();
+    let mut r = R::new(s);
+    for chunk in buf.chunks_mut(B) {
+        let mut k = [0u8; 36];
+        k.copy_from_slice(&chunk[..36]);
+        while !seen.insert(k) {
+            let u = r.uuid();
+            fmt(chunk, &u);
+            k.copy_from_slice(&chunk[..36]);
+        }
+    }
+}
+
 fn make(n: usize) -> Vec<u8> {
     let n = n.min(MAX);
     if n == 0 { return vec![] }
     let mut buf = vec![0u8; n * B];
     if n < 8192 {
         fill(&mut buf, n, seed());
-        return buf;
+    } else {
+        let w = thread::available_parallelism()
+            .map(|v| v.get())
+            .unwrap_or(4)
+            .min(n);
+        let s = seed();
+        let c = (n + w - 1) / w;
+        thread::scope(|sc| {
+            for (i, sl) in buf.chunks_mut(c * B).enumerate() {
+                let cnt = sl.len() / B;
+                let ts = s ^ (i as u64 + 1).wrapping_mul(0xbf58476d1ce4e5b9);
+                sc.spawn(move || fill(sl, cnt, ts));
+            }
+        });
     }
-    let w = thread::available_parallelism()
-        .map(|v| v.get())
-        .unwrap_or(4)
-        .min(n);
-    let s = seed();
-    let c = (n + w - 1) / w;
-    thread::scope(|sc| {
-        for (i, sl) in buf.chunks_mut(c * B).enumerate() {
-            let cnt = sl.len() / B;
-            let ts = s ^ (i as u64 + 1).wrapping_mul(0xbf58476d1ce4e5b9);
-            sc.spawn(move || fill(sl, cnt, ts));
-        }
-    });
+    dedup(&mut buf, seed());
     buf
 }
 
